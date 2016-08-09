@@ -28,8 +28,9 @@
 #include "Common.h"
 #include "Driver.h"
 #include "GraphEnvironment.h"
-#include "TemplateAStar.h"
+//#include "TemplateAStar.h"
 #include "TextOverlay.h"
+#include "MM.h"
 #include <string>
 
 enum mode {
@@ -39,7 +40,7 @@ enum mode {
 	kFindPath
 };
 
-TemplateAStar<graphState, graphMove, GraphEnvironment> astar;
+MM<graphState, graphMove, GraphEnvironment> mm;
 std::vector<graphState> path;
 
 mode m = kAddNodes;
@@ -95,7 +96,7 @@ void InstallHandlers()
 	InstallKeyboardHandler(MyDisplayHandler, "Step Abs Type", "Decrease abstraction type", kAnyModifier, '[');
 	InstallKeyboardHandler(MyDisplayHandler, "Clear", "Clear graph", kAnyModifier, '|');
 	InstallKeyboardHandler(MyDisplayHandler, "Help", "Draw help", kAnyModifier, '?');
-	InstallKeyboardHandler(MyDisplayHandler, "Weight", "Toggle Dijkstra, A* and Weighted A*", kAnyModifier, 'w');
+	InstallKeyboardHandler(MyDisplayHandler, "Weight", "Toggle Dijkstra & A*", kAnyModifier, 'w');
 	InstallKeyboardHandler(MyDisplayHandler, "Save", "Save current graph", kAnyModifier, 's');
 	InstallKeyboardHandler(MyDisplayHandler, "Load", "Load last saved graph", kAnyModifier, 'l');
 	InstallKeyboardHandler(DefaultGraph, "Default", "Build Deafult Graph", kAnyModifier, 'a', 'd');
@@ -124,9 +125,7 @@ void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 		ge = new GraphEnvironment(g);
 		ge->SetDrawEdgeCosts(true);
 		ge->SetDrawNodeLabels(true);
-		astar.SetWeight(1.0);
-		astar.SetHeuristic(&h);
-		te.AddLine("A* algorithm sample code");
+		te.AddLine("MM algorithm sample code");
 		te.AddLine("Current mode: add nodes (click to add node)");
 		te.AddLine("Press [ or ] to change modes. '?' for help.");
 	}
@@ -153,7 +152,7 @@ void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 		if (running)
 		{
 			//astar.DoSingleSearchStep(path);
-			astar.OpenGLDraw();
+			mm.OpenGLDraw();
 		}
 		else {
 			ge->SetColor(0.75, 0.75, 1.0);
@@ -180,7 +179,7 @@ void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 	if (recording && viewport == GetNumPorts(windowID)-1)
 	{
 		char fname[255];
-		sprintf(fname, "/Users/nathanst/Movies/tmp/astar-%d%d%d%d",
+		sprintf(fname, "/Users/nathanst/Movies/tmp/MM-%d%d%d%d",
 				(frameCnt/1000)%10, (frameCnt/100)%10, (frameCnt/10)%10, frameCnt%10);
 		SaveScreenshot(windowID, fname);
 		printf("Saved %s\n", fname);
@@ -246,19 +245,6 @@ void MyDisplayHandler(unsigned long windowID, tKeyboardModifier mod, char key)
 			running = false;
 		}
 			break;
-		case 'w':
-			if (weight == 1.0)
-				weight = 2.0;
-			else if (weight > 1.0)
-				weight = 0.0;
-			else
-				weight = 1.0;
-			astar.SetWeight(weight);
-			astar.InitializeSearch(ge, astar.start, astar.goal, path);
-			ShowSearchInfo();
-			
-			running = true;
-			break;
 		case 'r':
 			recording = !recording;
 			break;
@@ -287,7 +273,7 @@ void MyDisplayHandler(unsigned long windowID, tKeyboardModifier mod, char key)
 		{
 			if (running)
 			{
-				astar.DoSingleSearchStep(path);
+				mm.DoSingleSearchStep(path);
 				ShowSearchInfo();
 			}
 		}
@@ -379,106 +365,137 @@ void ShowSearchInfo()
 	std::string s;
 	te.Clear();
 	s = "-----> Searching from ";
-	s +=g->GetNode(astar.start)->GetName();
+	s +=g->GetNode(mm.start)->GetName();
 	s +=" to ";
-	s += g->GetNode(astar.goal)->GetName();
+	s += g->GetNode(mm.goal)->GetName();
 	s += " <-----";
-	s += " w:" + MyToString(weight);
 	te.AddLine(s.c_str());
 	te.AddLine("Press 'o' to advance search.");
-	for (int x = 0; x < g->GetNumNodes(); x++)
-	{
-		double gcost;
-		s = g->GetNode(x)->GetName();
-		switch (astar.GetStateLocation(x))
-		{
-			case kClosedList:
-			{
-				s += ": Closed  (g: ";
-				astar.GetClosedListGCost(x, gcost);
-				s += MyToString(gcost);
-				s += ", h: ";
-				s += MyToString(h.HCost(x, astar.goal));
-				s += ")";
-			}
-			break;
-			case kOpenList:
-			{
-				s += ": Open    (g: ";
-				astar.GetOpenListGCost(x, gcost);
-				s += MyToString(gcost);
-				s += ", h: ";
-				s += MyToString(h.HCost(x, astar.goal));
-				s += ")";
-			}
-				break;
 
-			case kNotFound:
-				s += ": Ungenerated (h: ";
-				s += MyToString(h.HCost(x, astar.goal));
-				s += ")";
-				break;
-		}
-		
+	te.AddLine("Forward Search:");
+	for (int x = 0; x < mm.GetNumForwardItems(); x++)
+	{
+		const auto &item = mm.GetForwardItem(x);
+		s = g->GetNode(item.data)->GetName();
+		s += " p:"+MyToString(item.g+std::max(item.g, item.h));
+		s += " f:"+MyToString(item.g+item.h);
+		s += " g:"+MyToString(item.g);
+		s += " h:"+MyToString(item.h);
+		s += (item.where==kOpenList)?" Open":" Closed";
 		te.AddLine(s.c_str());
 	}
-
-	te.AddLine("");
-	te.AddLine("Open List:");
-	size_t length = strlen(te.GetLastLine());
-	for (int x = length; x < colWidth; x++)
-		te.AppendToLine(" ");
-	te.AppendToLine("Closed List:");
-
-	std::vector<std::string> open, closed;
-	
-	for (int x = 0; x < astar.GetNumOpenItems(); x++)
+	te.AddLine("Backward Search:");
+	for (int x = 0; x < mm.GetNumBackwardItems(); x++)
 	{
-		auto item = astar.GetOpenItem(x);
+		const auto &item = mm.GetBackwardItem(x);
 		s = g->GetNode(item.data)->GetName();
-		s += ": ";
-		s += MyToString(item.g+item.h);
-		s += "=";
-		s += MyToString(item.g);
-		s += "+";
-		s += MyToString(item.h);
-		s += " p: ";
-		s += g->GetNode(astar.GetItem(item.parentID).data)->GetName();
-		//te.AddLine(s.c_str());
-		open.push_back(s);
+		s += " p:"+MyToString(item.g+std::max(item.g, item.h));
+		s += " f:"+MyToString(item.g+item.h);
+		s += " g:"+MyToString(item.g);
+		s += " h:"+MyToString(item.h);
+		s += (item.where==kOpenList)?" Open":" Closed";
+		te.AddLine(s.c_str());
+	}
+	if (path.size() > 0)
+	{
+		s = "Terminated on solution cost ";
+		s += MyToString(ge->GetPathLength(path));
+		te.AddLine(s.c_str());
 	}
 	
-	for (int x = 0; x < astar.GetNumItems(); x++)
-	{
-		auto item = astar.GetItem(x);
-		if (item.where == kClosedList)
-		{
-			s = g->GetNode(item.data)->GetName();
-			s += ": ";
-			s += MyToString(item.g+item.h);
-			s += "=";
-			s += MyToString(item.g);
-			s += "+";
-			s += MyToString(item.h);
-			s += " p: ";
-			s += g->GetNode(astar.GetItem(item.parentID).data)->GetName();
-			//te.AddLine(s.c_str());
-			closed.push_back(s);
-		}
-	}
-	for (size_t x = 0; x < open.size(); x++)
-	{
-		te.AddLine(open[x].c_str());
-		for (size_t t = open[x].length(); t < colWidth; t++)
-			te.AppendToLine(" ");
-		if (x < closed.size())
-			te.AppendToLine(closed[x].c_str());
-	}
-	for (size_t x = open.size(); x < closed.size(); x++)
-	{
-		te.AddLine("                        ");
-		te.AppendToLine(closed[x].c_str());
-	}
+	//	for (int x = 0; x < g->GetNumNodes(); x++)
+//	{
+//		double gcost;
+//		s = g->GetNode(x)->GetName();
+//		switch (mm.GetStateLocation(x))
+//		{
+//			case kClosedList:
+//			{
+//				s += ": Closed  (g: ";
+//				astar.GetClosedListGCost(x, gcost);
+//				s += MyToString(gcost);
+//				s += ", h: ";
+//				s += MyToString(h.HCost(x, astar.goal));
+//				s += ")";
+//			}
+//			break;
+//			case kOpenList:
+//			{
+//				s += ": Open    (g: ";
+//				astar.GetOpenListGCost(x, gcost);
+//				s += MyToString(gcost);
+//				s += ", h: ";
+//				s += MyToString(h.HCost(x, astar.goal));
+//				s += ")";
+//			}
+//				break;
+//
+//			case kNotFound:
+//				s += ": Ungenerated (h: ";
+//				s += MyToString(h.HCost(x, astar.goal));
+//				s += ")";
+//				break;
+//		}
+//		
+//		te.AddLine(s.c_str());
+//	}
+
+//	te.AddLine("");
+//	te.AddLine("Open List:");
+//	size_t length = strlen(te.GetLastLine());
+//	for (int x = length; x < colWidth; x++)
+//		te.AppendToLine(" ");
+//	te.AppendToLine("Closed List:");
+//
+//	std::vector<std::string> open, closed;
+//	
+//	for (int x = 0; x < astar.GetNumOpenItems(); x++)
+//	{
+//		auto item = astar.GetOpenItem(x);
+//		s = g->GetNode(item.data)->GetName();
+//		s += ": ";
+//		s += MyToString(item.g+item.h);
+//		s += "=";
+//		s += MyToString(item.g);
+//		s += "+";
+//		s += MyToString(item.h);
+//		s += " p: ";
+//		s += g->GetNode(astar.GetItem(item.parentID).data)->GetName();
+//		//te.AddLine(s.c_str());
+//		open.push_back(s);
+//	}
+//	
+//	for (int x = 0; x < astar.GetNumItems(); x++)
+//	{
+//		auto item = astar.GetItem(x);
+//		if (item.where == kClosedList)
+//		{
+//			s = g->GetNode(item.data)->GetName();
+//			s += ": ";
+//			s += MyToString(item.g+item.h);
+//			s += "=";
+//			s += MyToString(item.g);
+//			s += "+";
+//			s += MyToString(item.h);
+//			s += " p: ";
+//			s += g->GetNode(astar.GetItem(item.parentID).data)->GetName();
+//			//te.AddLine(s.c_str());
+//			closed.push_back(s);
+//		}
+//	}
+//	for (size_t x = 0; x < open.size(); x++)
+//	{
+//		te.AddLine(open[x].c_str());
+//		for (size_t t = open[x].length(); t < colWidth; t++)
+//			te.AppendToLine(" ");
+//		if (x < closed.size())
+//			te.AppendToLine(closed[x].c_str());
+//	}
+//	for (size_t x = open.size(); x < closed.size(); x++)
+//	{
+//		te.AddLine("                        ");
+//		te.AppendToLine(closed[x].c_str());
+//	}
 }
 
 double distsquared(unsigned long node, point3d loc)
@@ -613,9 +630,7 @@ bool MyClickHandler(unsigned long , int windowX, int windowY, point3d loc, tButt
 				to = FindClosestNode(g, loc)->GetNum();
 				if (from != to)
 				{
-					weight = 1.0;
-					astar.SetWeight(weight);
-					astar.InitializeSearch(ge, from, to, path);
+					mm.InitializeSearch(ge, from, to, &h, &h, path);
 					ShowSearchInfo();
 					
 					running = true;
