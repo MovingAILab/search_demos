@@ -44,15 +44,6 @@ enum mode {
 	kFindPath
 };
 
-enum view {
-	kTreeView = 0,
-	kTextView = 1,
-	kStateView = 2,
-	kPDB1View = 3,
-	kPDB2View = 4,
-	kPDB3View = 5
-};
-
 bool recording = false;
 bool running = false;
 double rate = 1.0/32.0;
@@ -76,8 +67,8 @@ std::vector<graphState> lastPath;
 
 int colorScheme = 10;
 
-TextOverlay te(6);
-float timer = 0;
+TextOverlay te(5);
+double timer = 0;
 
 double distance(unsigned long n1, unsigned long n2);
 
@@ -90,7 +81,6 @@ PermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>> *pdb2 = 0;
 PermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>> *pdb3 = 0;
 
 int whichHeuristic = 1;
-bool compressedPDBs = false;
 
 class GraphDistHeuristic : public Heuristic<graphState> {
 public:
@@ -151,8 +141,6 @@ void InstallHandlers()
 	InstallKeyboardHandler(MyDisplayHandler, "Faster", "Speed up simulation", kAnyModifier, '+');
 	InstallKeyboardHandler(MyDisplayHandler, "Slower", "Slow down simulation", kAnyModifier, '-');
 
-	InstallKeyboardHandler(MyDisplayHandler, "Compress", "Compress PDBs", kAnyModifier, 'c');
-
 	
 	InstallKeyboardHandler(MyDisplayHandler, "Increase rank", "Increase start rank and reset graph", kAnyModifier, ']');
 	InstallKeyboardHandler(MyDisplayHandler, "Decrease rank", "Decrease start rank and reset graph", kAnyModifier, '[');
@@ -169,26 +157,6 @@ void InstallHandlers()
 	InstallMouseClickHandler(MyClickHandler);
 }
 
-void BuildPDBs()
-{
-	goal.Reset();
-	mnp.StoreGoal(goal);
-
-	delete pdb1;
-	delete pdb2;
-	delete pdb3;
-	
-	pdb1 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p1);
-	pdb2 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p2);
-	pdb3 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p3);
-	
-	// TODO: introduce non-threaded BuildPDB code
-	pdb1->BuildPDB(goal);
-	pdb2->BuildPDB(goal);
-	pdb3->BuildPDB(goal);
-
-}
-
 void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 {
 	if (eType == kWindowDestroyed)
@@ -200,25 +168,20 @@ void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 	{
 		printf("Window %ld created\n", windowID);
 
-		BuildPDBs();
+		goal.Reset();
+		mnp.StoreGoal(goal);
+		pdb1 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p1);
+		pdb2 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p2);
+		pdb3 = new LexPermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>>(&mnp, goal, p3);
 		
-		//glClearColor(0.99, 0.99, 0.99, 1.0);
+		pdb1->BuildPDB(goal, std::thread::hardware_concurrency());
+		pdb2->BuildPDB(goal, std::thread::hardware_concurrency());
+		pdb3->BuildPDB(goal, std::thread::hardware_concurrency());
+
+		
+		glClearColor(0.99, 0.99, 0.99, 1.0);
 		InstallFrameHandler(MyFrameHandler, windowID, 0);
-
-		//	kTreeView = 0,
-		//	kTextView = 1,
-		//	kStateView = 2,
-		//	kPDB1View = 3,
-		//	kPDB2View = 4,
-		//	kPDB3View = 5
-
-		ReinitViewports(windowID, {-1, -1, 0, 1}, kScaleToFill); // kTreeView
-		AddViewport(windowID, {0, -1, 1, 1}, kScaleToFill); // kTextView
-		AddViewport(windowID, {0.25, 0, 0.75, 1}, kScaleToFill); // kStateView
-		AddViewport(windowID, {0, -0.666f+0.2f, 0.333f, 0.2f}, kScaleToFill); // kPDB1View
-		AddViewport(windowID, {0.333f, -0.666f+0.2f, 0.666f, 0.2f}, kScaleToFill); // kPDB2View
-		AddViewport(windowID, {0.666f, -0.666f+0.2f, 1, 0.2f}, kScaleToFill); // kPDB3View
-
+		SetNumPorts(windowID, 2);
 		g = new Graph();
 		ge = new GraphEnvironment(g);
 		ge->SetDrawNodeLabels(true);
@@ -236,56 +199,14 @@ void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 
 int frameCnt = 0;
 
-void DrawPDB(Graphics::Display &display, PermutationPDB<MNPuzzleState<3, 2>, slideDir, MNPuzzle<3, 2>> *pdb)
-{
-	display.FillRect({-1, -1, 1, 1}, Colors::black);
-	if (hit != -1) // node selected
-	{
-		mnp.GetStateFromHash(t1, hit);
-		uint64_t h1 = pdb->GetPDBHash(t1);
-		pdb->GetStateFromPDBHash(h1, t1);
-		mnp.Draw(display, t1);
-	}
-	else { // no node selected
-		if (timer < 1)
-			timer += rate;
-		if (timer < 1 && currentPath.size() > 0 && lastPath.size() > 0)
-		{
-			mnp.GetStateFromHash(t1, currentPath.back());
-			mnp.GetStateFromHash(t2, lastPath.back());
-			uint64_t h1 = pdb->GetPDBHash(t1);
-			uint64_t h2 = pdb->GetPDBHash(t2);
-			pdb->GetStateFromPDBHash(h1, t1);
-			pdb->GetStateFromPDBHash(h2, t2);
-			mnp.Draw(display, t1, t2, timer);
-		}
-		else // no animation in progres
-		{
-			mnp.GetStateFromHash(t1, ida.GetCurrentState());
-			uint64_t h1 = pdb->GetPDBHash(t1);
-			pdb->GetStateFromPDBHash(h1, t1);
-			mnp.Draw(display, t1);
-		}
-	}
-
-}
-
 void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 {
-	Graphics::Display &display = getCurrentContext()->display;
-//	display.FrameRect({-1, -1, 1, 1}, Colors::white, 1.0);
-
-
-	if (viewport == kTreeView)
+	if (viewport == 0)
 	{
-		if (timer >= 1 && running)
-			MyDisplayHandler(windowID, kNoModifier, 'o');
-
-		display.FillRect({-1, -1, 1, 1}, Colors::black);
 		if (ge == 0 || g == 0)
 			return;
 		ge->SetColor(0.5, 0.5, 1.0);
-		ge->Draw(display);
+		ge->OpenGLDraw();
 		
 		ge->SetColor(0.75, 0.75, 1.0);
 		double startf = g->GetNode(from)->GetLabelL(GraphSearchConstants::kTemporaryLabel)+h.HCost(from, 0);
@@ -296,89 +217,143 @@ void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 			rgbColor c = Colors::GetColor(cost, startf, goalf, colorScheme);
 			if (hit == x)
 			{
-				ge->SetColor(c.r, c.g, c.b);
-				//ge->SetColor(1, 1, 1);
-				ge->SetNodeScale(30);
-				ge->Draw(display, x);
+				ge->SetColor(0, 0, 0);
+				ge->SetNodeScale(25);
+				ge->OpenGLDraw(x);
 				ge->SetNodeScale(20);
 			}
-			else if (!fgreater(cost, goalf))
+			if (!fgreater(cost, goalf))
 			{
 				ge->SetColor(c.r, c.g, c.b);
-				ge->Draw(display, x);
+				ge->OpenGLDraw(x);
 			}
 		}
 		
-		// draw search path
-		if (currentPath.size() > 0)
-		{
-			ge->SetColor(Colors::yellow);
-			for (int x = 1; x < currentPath.size(); x++)
-			{
-				ge->DrawLine(display, currentPath[x-1], currentPath[x], 5);
-				//ge->GLDrawLine(path[x-1], path[x]);
-			}
-		}
-
-		// draw solution
 		if (path.size() > 0)
 		{
-//			printf("Drawing edge\n");
 			ge->SetColor(0, 1, 0);
+			glLineWidth(10);
 			for (int x = 1; x < path.size(); x++)
 			{
-				ge->DrawLine(display, path[x-1], path[x], 10);
-				//ge->GLDrawLine(path[x-1], path[x]);
+				ge->GLDrawLine(path[x-1], path[x]);
 			}
+			glLineWidth(1);
 		}
 
 		ge->SetColor(1.0, 0, 0);
-		ida.Draw(display);
+		glLineWidth(10);
+		ida.OpenGLDraw();
+		glLineWidth(1);
 	}
-
-	if (viewport == kTextView)
+	if (viewport == 1)
 	{
-		display.FillRect({-1, -1, 1, 1}, Colors::black);
-		te.Draw(display);
-	}
-	if (viewport == kStateView)
-	{
-		display.FillRect({-1, -1, 1, 1}, Colors::black);
-		if (hit != -1) // node selected
+		te.OpenGLDraw(windowID);
+		glScalef(0.7*1.0, 0.7*0.6666, 0.7*1.0);
+		glTranslatef(0, 0.7, 0);
+		if (currentPath.size() > 0 && lastPath.size() > 0)
 		{
-			mnp.GetStateFromHash(t1, hit);
-			mnp.Draw(display, t1);
-		}
-		else { // no node selected
 			if (timer < 1)
-				timer += rate;
-			if (timer < 1 && currentPath.size() > 0 && lastPath.size() > 0)
 			{
 				mnp.GetStateFromHash(t1, currentPath.back());
 				mnp.GetStateFromHash(t2, lastPath.back());
-				mnp.Draw(display, t1, t2, timer);
+				mnp.OpenGLDraw(t1, t2, timer);
+
+				glTranslatef(0, -1.5, 0);
+				glScalef(0.45*0.75, 0.45*0.75, 0.45*0.75);
+				glTranslatef(-2.25, 0, 0);
+				if (pdb1 && whichHeuristic&0x2)
+				{
+					uint64_t h1 = pdb1->GetPDBHash(t1);
+					uint64_t h2 = pdb1->GetPDBHash(t2);
+					pdb1->GetStateFromPDBHash(h1, t3);
+					pdb1->GetStateFromPDBHash(h2, t4);
+					mnp.OpenGLDraw(t3, t4, timer);
+				}
+				glTranslatef(2.25, 0, 0);
+				if (pdb2 && whichHeuristic&0x4)
+				{
+					uint64_t h1 = pdb2->GetPDBHash(t1);
+					uint64_t h2 = pdb2->GetPDBHash(t2);
+					pdb2->GetStateFromPDBHash(h1, t3);
+					pdb2->GetStateFromPDBHash(h2, t4);
+					mnp.OpenGLDraw(t3, t4, timer);
+				}
+				glTranslatef(2.25, 0, 0);
+				if (pdb3 && whichHeuristic&0x8)
+				{
+					uint64_t h1 = pdb3->GetPDBHash(t1);
+					uint64_t h2 = pdb3->GetPDBHash(t2);
+					pdb3->GetStateFromPDBHash(h1, t3);
+					pdb3->GetStateFromPDBHash(h2, t4);
+					mnp.OpenGLDraw(t3, t4, timer);
+				}
 			}
-			else // no animation in progres
-			{
+			else {
 				mnp.GetStateFromHash(t1, ida.GetCurrentState());
-				mnp.Draw(display, t1);
+				mnp.OpenGLDraw(t1);
+
+				glTranslatef(0, -1.5, 0);
+				glScalef(0.45*0.75, 0.45*0.75, 0.45*0.75);
+				glTranslatef(-2.25, 0, 0);
+				if (pdb1 && whichHeuristic&0x2)
+				{
+					uint64_t h1 = pdb1->GetPDBHash(t1);
+					pdb1->GetStateFromPDBHash(h1, t2);
+					mnp.OpenGLDraw(t2);
+				}
+				glTranslatef(2.25, 0, 0);
+				if (pdb2 && whichHeuristic&0x4)
+				{
+					uint64_t h1 = pdb2->GetPDBHash(t1);
+					pdb2->GetStateFromPDBHash(h1, t2);
+					mnp.OpenGLDraw(t2);
+				}
+				glTranslatef(2.25, 0, 0);
+				if (pdb3 && whichHeuristic&0x8)
+				{
+					uint64_t h1 = pdb3->GetPDBHash(t1);
+					pdb3->GetStateFromPDBHash(h1, t2);
+					mnp.OpenGLDraw(t2);
+				}
 			}
 		}
+		else {
+			timer += 1;
+			if (hit != -1)
+				mnp.GetStateFromHash(t1, hit);
+			else
+				mnp.GetStateFromHash(t1, ida.GetCurrentState());
+			mnp.OpenGLDraw(t1);
+
+			glTranslatef(0, -1.5, 0);
+			glScalef(0.45*0.75, 0.45*0.75, 0.45*0.75);
+			glTranslatef(-2.25, 0, 0);
+			if (pdb1 && whichHeuristic&0x2)
+			{
+				uint64_t h1 = pdb1->GetPDBHash(t1);
+				pdb1->GetStateFromPDBHash(h1, t2);
+				mnp.OpenGLDraw(t2);
+			}
+			glTranslatef(2.25, 0, 0);
+			if (pdb2 && whichHeuristic&0x4)
+			{
+				uint64_t h1 = pdb2->GetPDBHash(t1);
+				pdb2->GetStateFromPDBHash(h1, t2);
+				mnp.OpenGLDraw(t2);
+			}
+			glTranslatef(2.25, 0, 0);
+			if (pdb3 && whichHeuristic&0x8)
+			{
+				uint64_t h1 = pdb3->GetPDBHash(t1);
+				pdb3->GetStateFromPDBHash(h1, t2);
+				mnp.OpenGLDraw(t2);
+			}
+		}
+		timer += rate;
 	}
 
-	if (viewport == kPDB1View && pdb1 && (whichHeuristic&0x2))
-	{
-		DrawPDB(display, pdb1);
-	}
-	if (viewport == kPDB2View && pdb1 && (whichHeuristic&0x4))
-	{
-		DrawPDB(display, pdb2);
-	}
-	if (viewport == kPDB3View && pdb1 && (whichHeuristic&0x8))
-	{
-		DrawPDB(display, pdb3);
-	}
-
+	
+	
 	if (recording && viewport == GetNumPorts(windowID)-1)
 	{
 		char fname[255];
@@ -395,6 +370,8 @@ void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 		}
 	}
 	
+	if (timer > 1 && running && viewport == GetNumPorts(windowID)-1)
+		MyDisplayHandler(windowID, kNoModifier, 'o');
 	return;
 }
 
@@ -560,8 +537,6 @@ void MyDisplayHandler(unsigned long windowID, tKeyboardModifier mod, char key)
 			break;
 		case 'p':
 			running = !running;
-			if (running)
-				printf("Running automatically\n");
 			break;
 		case 'o':
 		{
@@ -576,23 +551,6 @@ void MyDisplayHandler(unsigned long windowID, tKeyboardModifier mod, char key)
 		{
 		}
 			break;
-		case 'c':
-		{
-			if (compressedPDBs)
-			{
-				BuildPDBs();
-				compressedPDBs = false;
-			}
-			else {
-				if (pdb1)
-					pdb1->DivCompress(2, false);
-				if (pdb2)
-					pdb2->DivCompress(2, false);
-				if (pdb3)
-					pdb3->DivCompress(2, false);
-				compressedPDBs = true;
-			}
-		}
 		default:
 			break;
 	}
@@ -661,8 +619,8 @@ void DefaultGraph(unsigned long windowID, tKeyboardModifier mod, char key)
 		long depth = n->GetLabelL(GraphSearchConstants::kTemporaryLabel);
 		long location = n->GetLabelL(GraphSearchConstants::kFirstData);
 		//printf("%d at depth %ld loc %ld\n", n->GetNum(), depth, location);
-		n->SetLabelF(GraphSearchConstants::kXCoordinate, ((2.0*(location+1.0))/(distribution[depth]+1.0)-1.0)*0.9);
-		n->SetLabelF(GraphSearchConstants::kYCoordinate, (-1.0+2.0*depth/distribution.size())*0.9);
+		n->SetLabelF(GraphSearchConstants::kXCoordinate, (2.0*(location+1.0))/(distribution[depth]+1.0)-1.0);
+		n->SetLabelF(GraphSearchConstants::kYCoordinate, -1.0+2.0*depth/distribution.size());
 		n->SetLabelF(GraphSearchConstants::kZCoordinate, 0);
 	}
 }
