@@ -9,20 +9,6 @@
  *
  * This file is part of HOG.
  *
- * HOG is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- * 
- * HOG is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- * 
- * You should have received a copy of the GNU General Public License
- * along with HOG; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
 #include "Common.h"
@@ -33,6 +19,7 @@
 #include "MapOverlay.h"
 #include <string>
 #include <sstream>
+#include "MapGenerators.h"
 
 enum mode {
 	kAddDH = 0,
@@ -42,60 +29,38 @@ enum mode {
 	kMeasureHeuristic = 4
 };
 
-MapEnvironment *me = 0;
-MapOverlay *mo = 0;
-TemplateAStar<xyLoc, tDirection, MapEnvironment> astar;
+enum mapType {
+	kRandomMap10 = 0,
+	kRandomMap20 = 1,
+	kRoomMap8 = 2,
+	kRoomMap16 = 3,
+	kMazeMap1 = 4,
+	kMazeMap2 = 5,
+	kDAMap = 6
+};
+
 std::vector<xyLoc> path;
-std::vector<xyLoc> points;
 
+graphState nodeToDraw = -1;
+xyLoc stateToDraw;
 xyLoc start, goal;
-xyLoc firstCompare, secondCompare;
+GraphEnvironment *ge=0, *basege=0;
+Graph *g=0, *base=0;
+MapEnvironment *me = 0;
+Map *map=0;
 
-mode m = kAddDH;
-void AddDH(xyLoc where);
 void LoadMap(Map *m);
+void DoOneDimension(int label);
+void NormalizeGraph();
 
 bool recording = false;
 bool running = false;
 bool mapChanged = true;
-bool showDH = false;
+bool graphChanged = true;
 
-int stepsPerFrame = 1;
-
-void FindSamplePoints();
-void EvaluateCompare();
-
-struct dh {
-	std::vector<double> depths;
-	xyLoc startLoc;
-};
-
-class DifferentialHeuristic : public Heuristic<xyLoc> {
-public:
-	double HCost(const xyLoc &a, const xyLoc &b) const
-	{
-		//return distance(a, b);
-		double v = e->HCost(a, b);
-		for (int x = 0; x < values.size(); x++)
-			v = std::max(v, fabs(values[x].depths[e->GetStateHash(a)]-values[x].depths[e->GetStateHash(b)]));
-		return v;
-	}
-	// Doesn't include the baseline heuristic
-	double DHCost(const xyLoc &a, const xyLoc &b) const
-	{
-		//return distance(a, b);
-		double v = 0;
-		for (int x = 0; x < values.size(); x++)
-			v = std::max(v, fabs(values[x].depths[e->GetStateHash(a)]-values[x].depths[e->GetStateHash(b)]));
-		return v;
-	}
-	void Clear()
-	{ values.resize(0); }
-	MapEnvironment *e;
-	std::vector<dh> values;
-};
-
-DifferentialHeuristic h;
+const float lerpspeed = 0.001;
+float lerp = -lerpspeed;
+bool doLerp = false;
 
 int main(int argc, char* argv[])
 {
@@ -109,6 +74,9 @@ int main(int argc, char* argv[])
  */
 void InstallHandlers()
 {
+	InstallKeyboardHandler(MyDisplayHandler, "Load Map", "Load map", kAnyModifier, '0', '6');
+
+	InstallKeyboardHandler(MyDisplayHandler, "Lerp", "restart lerp", kAnyModifier, 'l');
 	InstallKeyboardHandler(MyDisplayHandler, "Record", "Record a movie", kAnyModifier, 'r');
 	InstallKeyboardHandler(MyDisplayHandler, "Help", "Draw help", kAnyModifier, '?');
 	InstallKeyboardHandler(MyDisplayHandler, "Clear", "Clear DH", kAnyModifier, '|');
@@ -126,6 +94,157 @@ void InstallHandlers()
 	InstallMouseClickHandler(MyClickHandler);
 }
 
+void CreateMap(mapType which)
+{
+	if (map)
+		delete map;
+	if (me)
+		delete me;
+	if (base)
+		delete base;
+	if (basege)
+		delete basege;
+	if (g)
+		delete g;
+	if (ge)
+		delete ge;
+
+	nodeToDraw = -1;
+	
+	static int seed = 20;
+	srandom(seed++);
+
+	map = new Map(80,80);
+	switch (which)
+	{
+		case kRandomMap20:
+			MakeRandomMap(map, 20);
+			break;
+		case kRandomMap10:
+			MakeRandomMap(map, 10);
+			break;
+		case kRoomMap8:
+			BuildRandomRoomMap(map, 8);
+			break;
+		case kRoomMap16:
+			BuildRandomRoomMap(map, 16);
+			break;
+		case kMazeMap1:
+			MakeMaze(map, 1);
+			break;
+		case kMazeMap2:
+			MakeMaze(map, 2);
+			break;
+		case kDAMap:
+			LoadMap(map);
+			break;
+	}
+	
+	me = new MapEnvironment(map);
+	if (doLerp)
+	{
+		base = GraphSearchConstants::GetUndirectedGraph(map);
+		basege = new GraphEnvironment(base);
+		ge->SetDirected(false);
+	}
+	g = GraphSearchConstants::GetUndirectedGraph(map);
+	ge = new GraphEnvironment(g);
+	ge->SetDirected(false);
+	
+	DoOneDimension(GraphSearchConstants::kXCoordinate);
+	DoOneDimension(GraphSearchConstants::kYCoordinate);
+	NormalizeGraph();
+	
+	
+	ge->SetDrawEdgeCosts(false);
+	ge->SetColor(Colors::white);
+	if (doLerp)
+	{
+		basege->SetDrawEdgeCosts(false);
+		basege->SetColor(Colors::white);
+	}
+	mapChanged = graphChanged = true;
+}
+
+void DoOneDimension(int label)
+{
+	TemplateAStar<graphState, graphMove, GraphEnvironment> astarf;
+	TemplateAStar<graphState, graphMove, GraphEnvironment> astarb;
+	std::vector<graphState> p;
+	node *n = g->GetRandomNode();
+	graphState s, t;
+	astarf.InitializeSearch(ge, n->GetNum(), 0, p);
+	while (astarf.GetNumOpenItems() > 0)
+	{
+		t = astarf.GetOpenItem(0).data;
+		astarf.DoSingleSearchStep(p);
+	}
+	astarb.InitializeSearch(ge, t, 0, p);
+	while (astarb.GetNumOpenItems() > 0)
+	{
+		s = astarb.GetOpenItem(0).data;
+		astarb.DoSingleSearchStep(p);
+	}
+	astarf.InitializeSearch(ge, s, 0, p);
+	while (astarf.GetNumOpenItems() > 0)
+	{
+		astarf.DoSingleSearchStep(p);
+	}
+	// assign first coordinates
+	//(dai + dab − dib)/2
+	double dab, dai, dib;
+	astarf.GetClosedListGCost(t, dab);
+	for (int x = 0; x < g->GetNumNodes(); x++)
+	{
+		node *n = g->GetNode(x);
+		astarf.GetClosedListGCost(x, dai);
+		astarb.GetClosedListGCost(x, dib);
+		n->SetLabelF(label, (dai+dab-dib)/2);
+//		n->SetLabelF(label, dab*(dai/(dai+dib)));
+	}
+	for (int x = 0; x < g->GetNumEdges(); x++)
+	{
+		edge *e = g->GetEdge(x);
+		double w = fabs(g->GetNode(e->getFrom())->GetLabelF(label)-g->GetNode(e->getTo())->GetLabelF(label));
+		e->setWeight(e->GetWeight()-w);
+	}
+}
+
+void NormalizeGraph()
+{
+	double maxx=0, maxy=0;
+	double minx = me->GetMap()->GetMapWidth()*me->GetMap()->GetMapHeight();
+	double miny = me->GetMap()->GetMapWidth()*me->GetMap()->GetMapHeight();
+	for (int x = 0; x < g->GetNumNodes(); x++)
+	{
+		node *n = g->GetNode(x);
+		double tx = n->GetLabelF(GraphSearchConstants::kXCoordinate);
+		double ty = n->GetLabelF(GraphSearchConstants::kYCoordinate);
+		maxx = std::max(maxx, tx);
+		minx = std::min(minx, tx);
+		maxy = std::max(maxy, ty);
+		miny = std::min(miny, ty);
+	}
+//	printf("X from %f to %f\n", minx, maxx);
+//	printf("Y from %f to %f\n", miny, maxy);
+	double scale = 2.0/std::max(maxx-minx, maxy-miny);
+	double xOff = minx+(maxx-minx)/2;
+	double yOff = miny+(maxy-miny)/2;
+
+	for (int x = 0; x < g->GetNumNodes(); x++)
+	{
+		node *n = g->GetNode(x);
+		double tx = n->GetLabelF(GraphSearchConstants::kXCoordinate);
+		double ty = n->GetLabelF(GraphSearchConstants::kYCoordinate);
+		tx = (tx-xOff)*scale;
+		ty = (ty-yOff)*scale;
+		n->SetLabelF(GraphSearchConstants::kXCoordinate, tx*0.95);
+		n->SetLabelF(GraphSearchConstants::kYCoordinate, ty*0.95);
+	}
+
+}
+
+#include "SVGUtil.h"
 void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 {
 	if (eType == kWindowDestroyed)
@@ -138,17 +257,10 @@ void MyWindowHandler(unsigned long windowID, tWindowEventType eType)
 		printf("Window %ld created\n", windowID);
 		//glClearColor(0.99, 0.99, 0.99, 1.0);
 		InstallFrameHandler(MyFrameHandler, windowID, 0);
-		SetNumPorts(windowID, 1);
-		
-		Map *map = new Map(1,1);
-		LoadMap(map);
-		//		map->SetTileSet(kWinter);
-		mo = new MapOverlay(map);
-		
-		me = new MapEnvironment(map);
-		h.e = me;
-		astar.SetHeuristic(&h);
-		submitTextToBuffer("Click anywhere in the map to place a differential heuristic");
+		ReinitViewports(windowID, {-1.0f, -1.f, 0.f, 1.f}, kScaleToSquare);
+		AddViewport(windowID, {0.f, -1.f, 1.f, 1.f}, kScaleToSquare); // kTextView
+
+		CreateMap(kRoomMap8);
 	}
 }
 
@@ -157,128 +269,64 @@ int frameCnt = 0;
 void MyFrameHandler(unsigned long windowID, unsigned int viewport, void *)
 {
 	Graphics::Display &display = getCurrentContext()->display;
+	if (lerp < 1 && recording)
+	{
+		lerp += lerpspeed;
+		if (lerp > 1)
+			lerp = 1;
+		graphChanged = true;
+	}
+	else { lerp = 1; }
 	
-	if (mapChanged == true)
+	if ((mapChanged||graphChanged) == true && viewport == 0)
 	{
 		display.StartBackground();
+		display.FillRect({-1, -1, 1, 1}, Colors::black);
+
 		me->Draw(display);
-		if (showDH)
-			mo->Draw(display);
+//		basege->Draw(display);
 		display.EndBackground();
 		mapChanged = false;
 	}
-
-	for (int x = 0; x < h.values.size(); x++)
+	if (graphChanged == true && viewport == 1)
 	{
-		me->SetColor(1.0, 0, 1.0);
-		me->Draw(display, h.values[x].startLoc);
-	}
-	
-	if (m == kIdentifyLowHeuristic || m == kIdentifyHighHeuristic)
-	{
-		static int counter = 0;
-		counter = (counter+1)%30;
+		display.StartBackground();
+		display.FillRect({-1, -1, 1, 1}, Colors::black);
 
-		me->SetColor(Colors::red);
-		for (const auto &p : points)
-			me->DrawAlternate(display, p);
-
-		if (counter < 15)
-			me->SetColor(Colors::purple);
-		else
-			me->SetColor(Colors::lighterblue);
-		for (const auto &p : points)
-		{
-			me->Draw(display, p);
-		}
-
-		if (firstCompare.x != 0)
-		{
-			me->SetColor(Colors::yellow);
-			me->DrawAlternate(display, firstCompare);
-			me->SetColor(Colors::blue);
-			me->Draw(display, firstCompare);
-		}
-		if (secondCompare.x != 0)
-		{
-			me->SetColor(Colors::yellow);
-			me->DrawAlternate(display, secondCompare);
-			me->SetColor(Colors::blue);
-			me->Draw(display, secondCompare);
-		}
-	}
-	
-	if (m == kMeasureHeuristic)
-	{
-		me->SetColor(Colors::purple);
-		me->DrawLine(display, start, goal, 3);
-	}
-	if (m == kFindPath)
-	{
-		if (!running)
-		{
-			me->SetColor(Colors::red);
-			me->DrawLine(display, start, goal, 3);
+		ge->SetDrawEdgeCosts(false);
+		ge->SetColor(Colors::white);
+		if (doLerp) {
+			ge->DrawLERP(display, base, g, lerp);
 		}
 		else {
-			astar.Draw(display);
-			
-			for (int x = 0; x < stepsPerFrame; x++)
-				if (path.size() == 0)
-					astar.DoSingleSearchStep(path);
-			
-			if (path.size() != 0)
-			{
-				me->SetColor(0, 1, 0);
-				glLineWidth(10);
-				for (int x = 1; x < path.size(); x++)
-				{
-					me->DrawLine(display, path[x-1], path[x]);
-				}
-				glLineWidth(1);
-			}
+			ge->Draw(display);
 		}
+		display.EndBackground();
+		graphChanged = false;
 	}
-
-//	if (viewport == 0)
-//	{
-//		
-//		if (running)
-//		{
-//			//astar.DoSingleSearchStep(path);
-//			astar.OpenGLDraw();
-//		}
-//		
-//		if (path.size() > 0)
-//		{
-//			me->SetColor(0, 1, 0);
-//			glLineWidth(10);
-//			for (int x = 1; x < path.size(); x++)
-//			{
-//				me->GLDrawLine(path[x-1], path[x]);
-//			}
-//			glLineWidth(1);
-//		}
-//	}
-
-//	if (recording && viewport == GetNumPorts(windowID)-1)
-//	{
-//		char fname[255];
-//		sprintf(fname, "/Users/nathanst/Movies/tmp/astar-%d%d%d%d",
-//				(frameCnt/1000)%10, (frameCnt/100)%10, (frameCnt/10)%10, frameCnt%10);
-//		SaveScreenshot(windowID, fname);
-//		printf("Saved %s\n", fname);
-//		frameCnt++;
-//		if (path.size() == 0)
-//		{
-//			MyDisplayHandler(windowID, kNoModifier, 'o');
-//		}
-//		else {
-//			recording = false;
-//		}
-//	}
-//	return;
-	
+	if (viewport == 0 && nodeToDraw != -1)
+	{
+		GLdouble x, y, z, r;
+		me->GetMap()->GetOpenGLCoord(stateToDraw.x, stateToDraw.y, x, y, z, r);
+		Graphics::point p(x, y);
+		display.FillCircle(p, 0.03, Colors::red);
+	}
+	if (viewport == 1 && nodeToDraw != -1)
+	{
+		node *n = g->GetNode(nodeToDraw);
+		Graphics::point p(n->GetLabelF(GraphSearchConstants::kXCoordinate),
+						  n->GetLabelF(GraphSearchConstants::kYCoordinate));
+		display.FillCircle(p, 0.03, Colors::red);
+		
+	}
+	if (viewport == 1 && recording)
+	{
+		std::string fname = "/Users/nathanst/Movies/tmp/FastMap_";
+		static int count = 0;
+		printf("Save to '%s'\n", (fname+std::to_string(count)+".svg").c_str());
+		MakeSVG(GetContext(windowID)->display, (fname+std::to_string((count/1000)%10)+std::to_string((count/100)%10)+std::to_string((count/10)%10)+std::to_string(count%10)+".svg").c_str(), 600, 600, 1);
+		count++;
+	}
 }
 
 int MyCLHandler(char *argument[], int maxNumArgs)
@@ -293,324 +341,122 @@ void MyDisplayHandler(unsigned long windowID, tKeyboardModifier mod, char key)
 {
 	switch (key)
 	{
+		case '0':
+		case '1':
+		case '2':
+		case '3':
+		case '4':
+		case '5':
+		case '6':
+			CreateMap((mapType)(key-'0'));
+			break;
+		case 'l':
+			lerp = 0;
 		case '[':
 		{
-			stepsPerFrame /= 2;
-			std::string s = std::to_string(stepsPerFrame)+" steps per frame";
-			submitTextToBuffer(s.c_str());
+//			stepsPerFrame /= 2;
+//			std::string s = std::to_string(stepsPerFrame)+" steps per frame";
+//			submitTextToBuffer(s.c_str());
 		}
 			break;
 		case ']':
 		{
-			if (stepsPerFrame <= 16384)
-				stepsPerFrame *= 2;
-			if (stepsPerFrame == 0)
-				stepsPerFrame = 1;
-			std::string t = std::to_string(stepsPerFrame)+" steps per frame";
-			submitTextToBuffer(t.c_str());
+//			if (stepsPerFrame <= 16384)
+//				stepsPerFrame *= 2;
+//			if (stepsPerFrame == 0)
+//				stepsPerFrame = 1;
+//			std::string t = std::to_string(stepsPerFrame)+" steps per frame";
+//			submitTextToBuffer(t.c_str());
 		}
 			break;
 		case '|':
-			h.Clear();
+//			h.Clear();
 			break;
 		case 'a':
-			submitTextToBuffer("Click anywhere in the map to place a differential heuristic");
-			m = kAddDH;
+////			submitTextToBuffer("Click anywhere in the map to place a differential heuristic");
+//			m = kAddDH;
 			break;
 		case 'm':
-			if (h.values.size() == 0)
-			{
-				submitTextToBuffer("Error: Must place DH first");
-				break;
-			}
-			m = kMeasureHeuristic;
+//			if (h.values.size() == 0)
+//			{
+//				submitTextToBuffer("Error: Must place DH first");
+//				break;
+//			}
+//			m = kMeasureHeuristic;
 			break;
 		case 'd':
-			showDH = !showDH;
-			mapChanged = true;
+//			showDH = !showDH;
+//			mapChanged = true;
 			break;
 		case 'p':
 		{
-			if (showDH)
-			{
-				showDH = false;
-				mapChanged = true;
-			}
-			m = kFindPath;
-			start = goal = {0, 0};
-			path.resize(0);
-			submitTextToBuffer("Click and drag to find path");
+//			if (showDH)
+//			{
+//				showDH = false;
+//				mapChanged = true;
+//			}
+//			m = kFindPath;
+//			start = goal = {0, 0};
+//			path.resize(0);
+//			submitTextToBuffer("Click and drag to find path");
 		}
 			break;
 		case 'h':
-			if (h.values.size() == 0)
-			{
-				submitTextToBuffer("Error: Must place DH first");
-				break;
-			}
-			submitTextToBuffer("Select two of the points that have a high heuristic value in the current DH");
-			m = kIdentifyHighHeuristic;
-			FindSamplePoints();
-			break;
-		case 'l':
-			if (h.values.size() == 0)
-			{
-				submitTextToBuffer("Error: Must place DH first");
-				break;
-			}
-			submitTextToBuffer("Select two of the points that have a low heuristic value in the current DH");
-			m = kIdentifyLowHeuristic;
-			FindSamplePoints();
+//			if (h.values.size() == 0)
+//			{
+//				submitTextToBuffer("Error: Must place DH first");
+//				break;
+//			}
+//			submitTextToBuffer("Select two of the points that have a high heuristic value in the current DH");
+//			m = kIdentifyHighHeuristic;
+//			FindSamplePoints();
 			break;
 	}
 }
 
-void ShowDiff()
-{
-	mo->Clear();
-	std::vector<xyLoc> p;
-	TemplateAStar<xyLoc, tDirection, MapEnvironment> search;
-	search.SetStopAfterGoal(false);
-	search.GetPath(me, start, start, p);
-	printf("%lld nodes expanded\n", search.GetNodesExpanded());
-	
-	for (int x = 0; x < search.GetNumItems(); x++)
-	{
-		double cost;
-		xyLoc v = search.GetItem(x).data;
-		if (!search.GetClosedListGCost(v, cost))
-			printf("Error reading depth from closed list!\n");
-		else {
-			int hash = me->GetStateHash(v);
-			//printf("(%d, %d): %f\n", v.x, v.y, cost);
-			mo->SetOverlayValue(v.x, v.y, cost-h.HCost(start, v));
-			//printf("Read value: %f\n", mo->GetOverlayValue(v.x, v.y));
-		}
-	}
-}
 
-void AddDH(xyLoc where)
-{
-	mo->Clear();
-	dh newDH;
-	mo->SetTransparentValue(0);
-	newDH.startLoc = where;
-	newDH.depths.resize(me->GetMaxHash());
-	std::vector<xyLoc> p;
-	TemplateAStar<xyLoc, tDirection, MapEnvironment> search;
-	search.SetStopAfterGoal(false);
-	search.GetPath(me, where, where, p);
-	
-	for (int x = 0; x < search.GetNumItems(); x++)
-	{
-		double cost;
-		xyLoc v = search.GetItem(x).data;
-		if (!search.GetClosedListGCost(v, cost))
-			printf("Error reading depth from closed list!\n");
-		else {
-			int hash = me->GetStateHash(v);
-			newDH.depths[hash] = cost;
-			//printf("(%d, %d): %f\n", v.x, v.y, cost);
-			mo->SetOverlayValue(v.x, v.y, cost);
-			//printf("Read value: %f\n", mo->GetOverlayValue(v.x, v.y));
-		}
-	}
-	mo->SetColorMap(10);
-	h.values.push_back(newDH);
-}
 
-void DHMouseHandler(tMouseEventType mType, point3d loc)
+
+
+
+void GetMapLoc(tMouseEventType mType, point3d loc)
 {
 	int x, y;
 	me->GetMap()->GetPointFromCoordinate(loc, x, y);
-	if (me->GetMap()->GetTerrainType(x, y) != kGround)
-		return;
-	
-	switch (mType)
-	{
-		case kMouseDown:
-		{
-			h.Clear();
-			xyLoc tmp = {static_cast<uint16_t>(x), static_cast<uint16_t>(y)};
-			AddDH(tmp);
-			mapChanged = true;
-			break;
-		}
-		case kMouseDrag:
-		case kMouseUp:
-			break;
-	}
+	nodeToDraw = me->GetMap()->GetNodeNum(x, y);
+	stateToDraw.x = x;
+	stateToDraw.y = y;
+	printf("Hit (%d, %d)\n", x, y);
 }
 
-void DHGoodBadHandler(tMouseEventType mType, point3d loc)
+double dist(point3d loc, graphState s)
 {
-	int x, y;
-	me->GetMap()->GetPointFromCoordinate(loc, x, y);
-	xyLoc tmp = xyLoc(x, y);
-	switch (mType)
-	{
-		case kMouseDown:
-		{
-			if (firstCompare.x == 0)
-			{
-				double besth = 10000;
-				for (auto p : points)
-					if (h.HCost(p, tmp) < besth)
-					{
-						besth = h.HCost(p, tmp);
-						firstCompare = p;
-					}
-			}
-			else {
-				double besth = 10000;
-				for (auto p : points)
-					if (h.HCost(p, tmp) < besth)
-					{
-						besth = h.HCost(p, tmp);
-						secondCompare = p;
-					}
-				EvaluateCompare();
-			}
-			break;
-		}
-		case kMouseDrag:
-		case kMouseUp:
-			break;
-	}
-
+	double x = g->GetNode(s)->GetLabelF(GraphSearchConstants::kXCoordinate);
+	double y = g->GetNode(s)->GetLabelF(GraphSearchConstants::kYCoordinate);
+	return (loc.x-x)*(loc.x-x)+(loc.y-y)*(loc.y-y);
 }
 
-void GetPathHandler(tMouseEventType mType, point3d loc)
+void GetGraphLoc(tMouseEventType mType, point3d loc)
 {
-	int x, y;
-	me->GetMap()->GetPointFromCoordinate(loc, x, y);
-	xyLoc tmp(x, y);
-	if (me->GetMap()->GetTerrainType(x, y) != kGround)
-		return;
-	
-	switch (mType)
-	{
-		case kMouseDown: goal = start = tmp; running = false; break;
-		case kMouseDrag: goal = tmp; break;
-		case kMouseUp:
-		{
-			goal = tmp;
-			astar.InitializeSearch(me, start, goal, path);
-			astar.SetHeuristic(&h);
-			running = true;
-		}
-	}
+	graphState best = 0;
+	for (int t = 0; t < g->GetNumNodes(); t++)
+		if (dist(loc, t) < dist(loc, best))
+			best = t;
+
+	nodeToDraw = best;
+	stateToDraw.x = g->GetNode(best)->GetLabelL(GraphSearchConstants::kMapX);
+	stateToDraw.y = g->GetNode(best)->GetLabelL(GraphSearchConstants::kMapY);
 }
 
-void GetMeasureHandler(tMouseEventType mType, point3d loc)
+bool MyClickHandler(unsigned long , int viewport, int windowX, int windowY, point3d loc, tButtonType button, tMouseEventType mType)
 {
-	int x, y;
-	me->GetMap()->GetPointFromCoordinate(loc, x, y);
-	xyLoc tmp(x, y);
-	if (me->GetMap()->GetTerrainType(x, y) != kGround)
-		return;
-	
-	switch (mType)
-	{
-		case kMouseDown: goal = start = tmp; running = false; break;
-		case kMouseDrag: goal = tmp; break;
-		case kMouseUp: goal = tmp; break;
-	}
-	std::stringstream ss;
-	ss << "H-cost from " << start << " to " << goal << " is " << h.DHCost(start, goal);
-	submitTextToBuffer(ss.str().c_str());
-}
-
-bool MyClickHandler(unsigned long , int windowX, int windowY, point3d loc, tButtonType button, tMouseEventType mType)
-{
-	switch (m)
-	{
-		case kAddDH: DHMouseHandler(mType, loc); break;
-		case kIdentifyLowHeuristic:
-		case kIdentifyHighHeuristic: DHGoodBadHandler(mType, loc); break;
-		case kFindPath: GetPathHandler(mType, loc); break;
-		case kMeasureHeuristic: GetMeasureHandler(mType, loc); break;
-	}
+	if (viewport == 0)
+		GetMapLoc(mType, loc);
+	if (viewport == 1)
+		GetGraphLoc(mType, loc);
 	return true;
 }
 
-void FindSamplePoints()
-{
-	if (h.values.size() == 0)
-	{
-		return;
-	}
-	points.resize(0);
-	firstCompare = secondCompare = {0,0};
-	// choose 10 points - must not be too close
-	for (int p = 0; p < 10; p++)
-	{
-		xyLoc next;
-		while (true)
-		{
-			// Get free points
-			do {
-				next.x = random()%me->GetMap()->GetMapWidth();
-				next.y = random()%me->GetMap()->GetMapHeight();
-			} while (me->GetMap()->GetTerrainType(next.x, next.y) != kGround);
-
-			// Make sure they are farther from others
-			bool tooClose = false;
-			for (int t = 0; t < points.size(); t++)
-			{
-				if (h.HCost(points[t], next) < 20)
-					tooClose = true;
-			}
-			// Not too close to pivot either
-			if (h.HCost(h.values[0].startLoc, next) < 20)
-				tooClose = true;
-			
-			if (!tooClose)
-				break;
-		}
-		points.push_back(next);
-	}
-	
-}
-
-void EvaluateCompare()
-{
-	double dh = h.DHCost(firstCompare, secondCompare);
-	double mindh = 10000;
-	double maxdh = 0;
-	for (int x = 0; x < points.size(); x++)
-	{
-		for (int y = x+1; y < points.size(); y++)
-		{
-			mindh = std::min(mindh, h.DHCost(points[x], points[y]));
-			maxdh = std::max(maxdh, h.DHCost(points[x], points[y]));
-		}
-	}
-	if (m == kIdentifyLowHeuristic)
-	{
-		if (fequal(mindh, dh))
-		{
-			submitTextToBuffer("Great job - these points have the lowest heuristic");
-		}
-		else {
-			std::string tmp = "Your points have a DH "+std::to_string(dh)+" best is "+std::to_string(mindh);
-			submitTextToBuffer(tmp.c_str());
-			firstCompare = secondCompare = {0,0};
-		}
-	}
-	if (m == kIdentifyHighHeuristic)
-	{
-		if (fequal(maxdh, dh))
-		{
-			submitTextToBuffer("Great job - these points have the highest heuristic");
-		}
-		else {
-			std::string tmp = "Your points have a DH "+std::to_string(dh)+" best is "+std::to_string(maxdh);
-			submitTextToBuffer(tmp.c_str());
-			firstCompare = secondCompare = {0,0};
-		}
-	}
-}
 
 
 void LoadMap(Map *m)
