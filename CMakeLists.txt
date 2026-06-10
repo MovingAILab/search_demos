@@ -27,6 +27,9 @@ foreach(_dir ${_demo_dirs})
 
     add_executable(${_dir} ${_srcs})
     target_link_libraries(${_dir} PRIVATE hog2::hog2)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(${_dir} PRIVATE pthread)
+    endif()
 
     # Put all binaries in a common output directory
     set_target_properties(${_dir} PROPERTIES
