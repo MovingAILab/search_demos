@@ -18,6 +18,7 @@
 #include "MapOverlay.h"
 #include "BoundingBox.h"
 #include <string>
+#include <deque>
 #include "SVGUtil.h"
 
 enum mode {

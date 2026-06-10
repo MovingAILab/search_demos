@@ -24,6 +24,7 @@
 #include "JPS.h"
 //#include "gJPS.h"
 #include <fstream>
+#include <deque>
 #include "Timer.h"
 
 bool mouseTracking = false;

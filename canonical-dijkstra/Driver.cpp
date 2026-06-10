@@ -18,6 +18,7 @@
 #include "CanonicalGrid.h"
 #include <string>
 #include <fstream>
+#include <queue>
 
 MapEnvironment *me = 0;
 CanonicalGrid::CanonicalGrid *grid;

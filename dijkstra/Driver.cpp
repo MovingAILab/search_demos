@@ -15,6 +15,8 @@
 #include "TemplateAStar.h"
 #include "TextOverlay.h"
 #include <string>
+#include <deque>
+
 #include "SVGUtil.h"
 enum mode {
 	kAddNodes,
